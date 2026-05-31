@@ -10,6 +10,7 @@ from typing import Any
 import requests
 from requests.exceptions import RequestException
 
+from yxk_account_parse import generate_login_variants
 from yxk_core import (
     AccountRow,
     GATEWAY,
@@ -93,6 +94,68 @@ def login_by_api(
         if on_retry:
             on_retry(attempt, last_result)
         time.sleep(calc_backoff(attempt))
+
+    assert last_result is not None
+    return last_result
+
+
+def login_by_api_adaptive(
+    account: AccountRow,
+    title_dict: dict[str, Any],
+    *,
+    session: requests.Session | None = None,
+    on_retry: Callable[[int, QueryResult | str], None] | None = None,
+    max_attempts: int = MAX_ATTEMPTS,
+) -> QueryResult:
+    """API 登录；账号密码错误时自动尝试互换、符号纠正等识别变体。"""
+    variants = generate_login_variants(
+        account.username,
+        account.password,
+        raw=account.raw_input,
+    )
+    if not variants:
+        return login_by_api(
+            account,
+            title_dict,
+            session=session,
+            on_retry=on_retry,
+            max_attempts=max_attempts,
+        )
+
+    last_result: QueryResult | None = None
+    total_variants = len(variants)
+
+    for index, (username, password, label) in enumerate(variants):
+        trial = AccountRow(
+            username=username,
+            password=password,
+            remark=account.remark,
+            row_no=account.row_no,
+            raw_input=account.raw_input,
+        )
+        result = login_by_api(
+            trial,
+            title_dict,
+            session=session,
+            on_retry=on_retry,
+            max_attempts=max_attempts,
+        )
+        last_result = result
+
+        if result.status == LoginStatus.SUCCESS:
+            result.username = username
+            result.password = password
+            if label != "初始识别":
+                note = f"识别纠正: {label}"
+                result.error_msg = note if not result.error_msg else f"{result.error_msg} ({note})"
+            return result
+
+        if result.status != LoginStatus.PASSWORD_ERROR:
+            return result
+
+        if index + 1 < total_variants and on_retry:
+            next_label = variants[index + 1][2]
+            on_retry(index + 1, f"账号密码错误，尝试{next_label}")
 
     assert last_result is not None
     return last_result

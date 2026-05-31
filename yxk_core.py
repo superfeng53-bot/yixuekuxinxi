@@ -41,6 +41,7 @@ class AccountRow:
     password: str
     remark: str = ""
     row_no: int = 0
+    raw_input: str = ""
 
 
 @dataclass

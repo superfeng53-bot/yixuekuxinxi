@@ -11,6 +11,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from yxk_account_parse import split_credential_field
 from yxk_core import AccountRow, LoginStatus, QueryResult
 from yxk_paths import get_base_dir
 
@@ -18,7 +19,8 @@ BASE_DIR = get_base_dir()
 TEMPLATE_DIR = BASE_DIR / "template"
 TEMPLATE_FILE = TEMPLATE_DIR / "账号导入模板.xlsx"
 
-INPUT_HEADERS = ["账号", "密码", "备注"]
+INPUT_HEADERS = ["账号密码", "备注"]
+LEGACY_INPUT_HEADERS = ["账号", "密码", "备注"]
 OUTPUT_HEADERS = [
     "问题标记",
     "状态",
@@ -50,9 +52,22 @@ THIN_BORDER = Border(
 )
 
 
+def _template_is_current() -> bool:
+    if not TEMPLATE_FILE.exists():
+        return False
+    try:
+        wb = load_workbook(TEMPLATE_FILE, read_only=True, data_only=True)
+        ws = wb["账号列表"] if "账号列表" in wb.sheetnames else wb.active
+        header = _normalize_header(ws.cell(row=1, column=1).value)
+        wb.close()
+        return header == "账号密码"
+    except Exception:
+        return False
+
+
 def ensure_template() -> Path:
     TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
-    if TEMPLATE_FILE.exists():
+    if _template_is_current():
         return TEMPLATE_FILE
 
     wb = Workbook()
@@ -67,30 +82,34 @@ def ensure_template() -> Path:
         cell.border = THIN_BORDER
 
     samples = [
-        ("13982082863", "Ck636489", "示例-正常账号"),
-        ("15982046865", "lty623851", "示例-密码可能错误"),
-        ("13882270907", "Fang0907", "示例-正常账号"),
+        ("13982082863 Ck636489", "示例-空格分隔"),
+        ("15982046865,lty623851", "示例-英文逗号分隔"),
+        ("账号2345，密码jfe235", "示例-带标签逗号分隔"),
+        ("账号：2345密码ddd123", "示例-带标签连续填写"),
     ]
     for row_idx, row in enumerate(samples, start=2):
         for col_idx, value in enumerate(row, start=1):
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
             cell.border = THIN_BORDER
+            if col_idx == 1:
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
 
-    ws.column_dimensions["A"].width = 18
-    ws.column_dimensions["B"].width = 18
-    ws.column_dimensions["C"].width = 24
+    ws.column_dimensions["A"].width = 36
+    ws.column_dimensions["B"].width = 28
 
     guide = wb.create_sheet("填写说明")
     guide["A1"] = "易学酷账号批量查询 - 输入模板说明"
     guide["A1"].font = Font(bold=True, size=14)
     lines = [
         "1. 请在“账号列表”工作表中填写数据，从第2行开始。",
-        "2. “账号”“密码”为必填项，支持手机号/证件号/用户名。",
-        "3. “备注”可选，会原样带入导出结果。",
-        "4. 一键运行后会弹出文件选择框，请选择本模板或您的导入文件。",
-        "5. 导出结果保存在输入 Excel 同目录下。",
-        "6. 导出结果中，有问题账号会自动排在最前面并用颜色标注。",
-        "7. 标记“⚠ 账号密码有问题”表示用户名或密码错误(10013)。",
+        "2. “账号密码”列合并填写账号与密码，程序会自动识别拆分。",
+        "3. 支持空格、英文/中文逗号、分号、冒号、竖线、换行等作为分隔符。",
+        "4. 支持带标签写法，如“账号2345，密码jfe235”“账号：2345密码ddd123”。",
+        "5. 若识别顺序有误，登录失败时会自动尝试账号密码互换、符号纠正等组合。",
+        "6. “备注”可选，会原样带入导出结果。",
+        "7. 仍兼容旧版两列模板（账号 + 密码）。",
+        "8. 导出结果保存在输入 Excel 同目录下；问题账号排在最前并标色。",
+        "9. 标记“⚠ 账号密码有问题”表示全部识别组合均登录失败(10013)。",
     ]
     for idx, line in enumerate(lines, start=3):
         guide[f"A{idx}"] = line
@@ -121,20 +140,41 @@ def read_accounts(excel_path: str | Path) -> list[AccountRow]:
                 return idx
         return None
 
+    credential_idx = col("账号密码")
     username_idx = col("账号")
     password_idx = col("密码")
     remark_idx = col("备注")
-    if username_idx is None or password_idx is None:
-        raise ValueError("Excel 缺少必填列：账号、密码")
+
+    use_merged = credential_idx is not None
+    use_legacy = username_idx is not None and password_idx is not None
+    if not use_merged and not use_legacy:
+        raise ValueError("Excel 缺少必填列：账号密码（或旧版 账号 + 密码）")
 
     accounts: list[AccountRow] = []
     for row_no, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-        username = row[username_idx] if username_idx < len(row) else None
-        password = row[password_idx] if password_idx < len(row) else None
         remark = ""
         if remark_idx is not None and remark_idx < len(row) and row[remark_idx] is not None:
             remark = str(row[remark_idx]).strip()
 
+        if use_merged:
+            raw_value = row[credential_idx] if credential_idx < len(row) else None
+            raw_text = "" if raw_value is None else str(raw_value).strip()
+            if not raw_text:
+                continue
+            username_text, password_text = split_credential_field(raw_text)
+            accounts.append(
+                AccountRow(
+                    username=username_text,
+                    password=password_text,
+                    remark=remark,
+                    row_no=row_no,
+                    raw_input=raw_text,
+                )
+            )
+            continue
+
+        username = row[username_idx] if username_idx < len(row) else None
+        password = row[password_idx] if password_idx < len(row) else None
         username_text = "" if username is None else str(username).strip()
         password_text = "" if password is None else str(password).strip()
         if not username_text and not password_text:

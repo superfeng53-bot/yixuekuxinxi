@@ -12,7 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import requests
 
-from yxk_api_login import login_by_api
+from yxk_api_login import login_by_api_adaptive
 from yxk_core import LoginStatus, load_title_dict_with_retry
 from yxk_excel import ensure_template, export_results, read_accounts
 from yxk_paths import get_base_dir
@@ -189,7 +189,7 @@ class BatchRunnerApp:
                         ),
                     )
 
-                result = login_by_api(account, title_dict, session=session, on_retry=on_retry)
+                result = login_by_api_adaptive(account, title_dict, session=session, on_retry=on_retry)
                 results.append(result)
                 status_text = result.status.value
                 if result.is_problem:
